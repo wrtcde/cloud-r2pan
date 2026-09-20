@@ -2,24 +2,13 @@ import type { Env } from "./types";
 import { ensureSchema, randomId } from "./db";
 import { generateCodes, makeBatchId, formatCodeStatus, findCodeByString } from "./codes";
 import { getSettings, updateSettings } from "./settings";
-import { checkAdminKey, createSession, verifySession, clientIp, rateLimitLogin, requireAdminIp } from "./auth";
+import { checkAdminKey, createSession, verifySession, clientIp, rateLimit, requireAdminIp } from "./auth";
 import { pickLang } from "./i18n";
 import { hashPassword } from "./public";
 import { parseUA } from "./ua";
-import { encryptSecret, decryptSecret, totpGenerateSecret, totpVerify, totpUri, totpGenerateRecoveryCodes, sha256Hex, safeEqual } from "./crypto";
-import { createStorageProvider, type StorageProvider } from "./storage";
-
-/** 懒加载 StorageProvider —— 每次需要时从 settings 构造（settings 有 5s 缓存，成本低） */
-let _storagePromise: Promise<StorageProvider> | null = null;
-async function storage(env: Env): Promise<StorageProvider> {
-  if (!_storagePromise) {
-    _storagePromise = (async () => {
-      const s = await getSettings(env);
-      return createStorageProvider(env, s);
-    })();
-  }
-  return _storagePromise;
-}
+import { encryptSecret, decryptSecret, totpGenerateSecret, totpVerify, totpUri, totpGenerateRecoveryCodes, sha256Hex, safeEqual, hashWebDAVPassword } from "./crypto";
+import { getStorageProvider as storage } from "./storage";
+import { declaredSize, formatMb, postUploadRejection, preUploadRejection, usedStorageBytes } from "./limits";
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -29,6 +18,14 @@ const json = (data: unknown, status = 200) =>
 
 /** API 错误消息跟随请求语言（浏览器 fetch 自动携带 Accept-Language） */
 const msg = (req: Request, zh: string, en: string) => (pickLang(req) === "zh" ? zh : en);
+
+/** 上传被体积闸门挡下时的提示文案 */
+function uploadRejectMsg(req: Request, r: { code: "too_large" | "quota_exceeded"; limitBytes: number }): string {
+  const mb = formatMb(r.limitBytes);
+  return r.code === "too_large"
+    ? msg(req, `文件超过单个文件上限 ${mb} MB`, `File exceeds the ${mb} MB per-file limit`)
+    : msg(req, `存储空间不足（总配额 ${mb} MB）`, `Not enough storage quota (limit ${mb} MB)`);
+}
 
 /** 安全解析 JSON body（失败返回空对象） */
 async function readJson<T>(req: Request): Promise<Partial<T>> {
@@ -142,7 +139,7 @@ export async function handleAdminApi(
   // ── 登录（支持 2FA 两阶段） ──────────────────────────────
   if (path === "/api/admin/login" && method === "POST") {
     const ip = clientIp(req);
-    if (!rateLimitLogin(ip)) {
+    if (!rateLimit(ip, "admin-login")) {
       ctx.waitUntil(writeLoginLog(env, req, "login", "fail", "rate_limited"));
       return json({ error: msg(req, "尝试过于频繁，请稍后再试", "Too many attempts. Please try again later.") }, 429);
     }
@@ -267,6 +264,7 @@ export async function handleAdminApi(
     return json({
       ok: true,
       site_title: s.siteTitle,
+      max_upload_mb: Math.round(s.maxUploadBytes / 1024 ** 2),
       totp_enabled: s.totpEnabled,
       cloudflare_recovery: !!env.totp_recovery,
       recovery_remaining: s.totpRecoveryHash ? s.totpRecoveryHash.split(",").filter(Boolean).length : 0,
@@ -438,6 +436,18 @@ export async function handleAdminApi(
     const key = `files/${id}`;
     const mime = req.headers.get("content-type") || "application/octet-stream";
     const st = await storage(env);
+    const settings = await getSettings(env);
+    const declared = declaredSize(req);
+    // 配额判定要读一次 SUM(size)，所以只在配额开启时才发这条查询
+    const usedBytes = settings.storageQuotaBytes > 0 ? await usedStorageBytes(env) : 0;
+    const rejected = preUploadRejection(settings, usedBytes, declared);
+    if (rejected) {
+      return json(
+        { error: rejected.code, limit_mb: formatMb(rejected.limitBytes), message: uploadRejectMsg(req, rejected) },
+        rejected.status
+      );
+    }
+
     let resultSize = 0;
     try {
       const res = await st.put(key, req.body, {
@@ -446,7 +456,19 @@ export async function handleAdminApi(
       });
       resultSize = res.size;
     } catch (err: any) {
+      // 写一半失败也可能留下对象，清掉再报错
+      await st.delete(key).catch(() => {});
       return json({ error: msg(req, "存储写入失败", "Storage write failed"), detail: String(err?.message || err) }, 500);
+    }
+    // 上限与配额都按落盘后的真实体积判定（声明的 Content-Length 可以撒谎，size 不能）
+    const rejectedAfter = postUploadRejection(settings, usedBytes, resultSize);
+    if (rejectedAfter) {
+      // 对象删掉、行不落库，等于什么都没发生
+      await st.delete(key).catch(() => {});
+      return json(
+        { error: rejectedAfter.code, limit_mb: formatMb(rejectedAfter.limitBytes), message: uploadRejectMsg(req, rejectedAfter) },
+        rejectedAfter.status
+      );
     }
     // ── Bug #4 修复：D1 写入失败时清理已写入的 storage 对象 ──
     try {
@@ -564,6 +586,10 @@ export async function handleAdminApi(
     const downloadName =
       typeof body.download_name === "string" && body.download_name.trim() ? body.download_name.trim() : null;
     const isMarket = body.is_market ? 1 : 0;
+    // 公开市场只列无口令的分享；带口令还上架 = 管理员看到"已上架却搜不到"
+    if (isMarket && passwordHash) {
+      return json({ error: msg(req, "带访问口令的分享不能上架到下载市场", "Password-protected shares cannot be listed on the marketplace") }, 400);
+    }
     const marketTitle =
       typeof body.market_title === "string" && body.market_title.trim() ? body.market_title.trim() : null;
     const marketDesc =
@@ -592,16 +618,20 @@ export async function handleAdminApi(
     return json({ ok: true, id, url: `/s/${id}`, direct_url: directUrl }, 201);
   }
 
-  // ── 分享列表 ──────────────────────────────────────
+  // ── 分享列表（分页；口令只在显式点开时单独取，不随列表批量下发） ──
   if (path === "/api/admin/shares" && method === "GET") {
+    const sp = new URL(req.url).searchParams;
+    const limit = Math.min(500, Math.max(1, Number(sp.get("limit")) || 100));
+    const offset = Math.max(0, Number(sp.get("offset")) || 0);
+    const totalRow = await env.db.prepare("SELECT COUNT(*) AS c FROM shares").first<{ c: number }>();
     const { results } = await env.db.prepare(
       `SELECT s.id, s.file_id, s.created_at, s.expires_at, s.max_downloads, s.download_count, s.revoked,
-              s.password_hash, s.password_cipher, s.download_name, s.direct_id,
+              s.password_hash, s.download_name, s.direct_id,
               s.is_market, s.market_views, s.market_title, s.market_desc,
               f.name AS file_name, f.size AS file_size, f.mime AS file_mime
        FROM shares s JOIN files f ON f.id = s.file_id
-       ORDER BY s.created_at DESC`
-    ).all();
+       ORDER BY s.created_at DESC LIMIT ?1 OFFSET ?2`
+    ).bind(limit, offset).all();
     const now = Date.now();
     // 这个功能上线前创建的分享没有直链，这里按需补建（有密码的不补：直链等于绕过密码）
     const backfill = (results ?? []).filter((s: any) =>
@@ -616,26 +646,35 @@ export async function handleAdminApi(
       });
       await env.db.batch(stmts);
     }
-    // 并行解密所有密码明文
-    const shares = await Promise.all(
-      (results ?? []).map(async (s: any) => ({
-        ...s,
-        has_password: !!s.password_hash,
-        password_plain: s.password_cipher ? await decryptSecret(s.password_cipher, env.admin) : null,
-        password_hash: undefined,
-        password_cipher: undefined,
-        url: `/s/${s.id}`,
-        direct_url: s.direct_id ? `/d/${s.direct_id}` : null,
-        status: s.revoked
-          ? "revoked"
-          : s.expires_at && s.expires_at < now
-            ? "expired"
-            : s.max_downloads && s.download_count >= s.max_downloads
-              ? "maxed"
-              : "active",
-      }))
-    );
-    return json({ shares });
+    const shares = (results ?? []).map((s: any) => ({
+      ...s,
+      has_password: !!s.password_hash,
+      password_hash: undefined,
+      url: `/s/${s.id}`,
+      direct_url: s.direct_id ? `/d/${s.direct_id}` : null,
+      status: s.revoked
+        ? "revoked"
+        : s.expires_at && s.expires_at < now
+          ? "expired"
+          : s.max_downloads && s.download_count >= s.max_downloads
+            ? "maxed"
+            : "active",
+    }));
+    return json({ shares, total: totalRow?.c ?? 0, limit, offset });
+  }
+
+  // ── 查看单条分享的访问口令（管理员主动点开时才解密） ──
+  const sharePwMatch = /^\/api\/admin\/shares\/([^/]+)\/password$/.exec(path);
+  if (sharePwMatch && method === "GET") {
+    const shareId = decodeURIComponent(sharePwMatch[1]);
+    const row = await env.db
+      .prepare("SELECT password_cipher FROM shares WHERE id = ?1")
+      .bind(shareId)
+      .first<{ password_cipher: string | null }>();
+    if (!row) return json({ error: msg(req, "分享不存在", "Share not found") }, 404);
+    if (!row.password_cipher) return json({ password: null });
+    const password = await decryptSecret(row.password_cipher, env.admin);
+    return json({ password: password ?? "" });
   }
 
   // ── 清理失效分享（过期 / 已撤销 / 达上限） + 孤儿 files + 孤儿 R2 对象 ──
@@ -726,8 +765,12 @@ export async function handleAdminApi(
   if (shareMarketMatch && method === "PUT") {
     const id = shareMarketMatch[1];
     const body = await readJson<{ is_market?: boolean; market_title?: string | null; market_desc?: string | null }>(req);
-    const existing = await env.db.prepare("SELECT id FROM shares WHERE id = ?1").bind(id).first();
+    const existing = await env.db.prepare("SELECT id, password_hash FROM shares WHERE id = ?1").bind(id)
+      .first<{ id: string; password_hash: string | null }>();
     if (!existing) return json({ error: msg(req, "分享不存在", "Share not found") }, 404);
+    if (body.is_market && existing.password_hash) {
+      return json({ error: msg(req, "带访问口令的分享不能上架到下载市场", "Password-protected shares cannot be listed on the marketplace") }, 400);
+    }
     const isMarket = body.is_market === undefined ? null : (body.is_market ? 1 : 0);
     const mTitle = typeof body.market_title === "string" ? (body.market_title.trim() || null) : null;
     const mDesc = typeof body.market_desc === "string" ? (body.market_desc.trim() || null) : null;
@@ -1055,6 +1098,7 @@ export async function handleAdminApi(
          WHERE 1=1 ${where}
          ORDER BY dl.created_at DESC`
       )
+      .bind(...bindVals)
       .all();
     const now = Date.now();
     const list = (results ?? []).map((dl: any) => ({
@@ -1175,6 +1219,8 @@ export async function handleAdminApi(
     const enabledProviders = providers.results.filter((p) => p.enabled);
     return json({
       site_title: s.siteTitle,
+      max_upload_mb: s.maxUploadBytes / 1024 ** 2,
+      storage_quota_mb: s.storageQuotaBytes / 1024 ** 2,
       traffic_limit_gb: s.trafficLimitBytes / 1024 ** 3,
       max_downloads_per_ip: s.maxDownloadsPerIp,
       count_window_hours: s.countWindowHours,
@@ -1202,6 +1248,10 @@ export async function handleAdminApi(
       oauth_has_enabled_providers: enabledProviders.length > 0,
       // IP 白名单
       admin_ips: s.adminIps,
+      // WebDAV（只报状态，不下发哈希）
+      webdav_enabled: s.webdavEnabled,
+      webdav_username: s.webdavUsername,
+      webdav_has_password: !!s.webdavPasswordHash,
       // 下载市场首页
       home_redirect_market: s.homeRedirectMarket,
       // 激活码浮动按钮
@@ -1230,6 +1280,11 @@ export async function handleAdminApi(
     const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
     const gb = num(body.traffic_limit_gb);
     if (gb !== null) patch.traffic_limit_bytes = String(Math.round(gb * 1024 ** 3));
+    // 单文件上限：Workers 的请求体本身就卡在 100 MB，写更大只是自欺
+    const uploadMb = num(body.max_upload_mb);
+    if (uploadMb !== null) patch.max_upload_mb = String(Math.min(100, Math.floor(uploadMb)));
+    const quotaMb = num(body.storage_quota_mb); // 0 = 不限
+    if (quotaMb !== null) patch.storage_quota_mb = String(Math.floor(quotaMb));
     const perIp = num(body.max_downloads_per_ip);
     if (perIp !== null) patch.max_downloads_per_ip = String(Math.floor(perIp));
     const window = num(body.count_window_hours);
@@ -1247,8 +1302,12 @@ export async function handleAdminApi(
     const th = num(body.turnstile_threshold);
     if (th !== null) patch.turnstile_threshold = String(Math.floor(th));
     if (typeof body.turnstile_sitekey_override === "string") {
-      // 允许清空
-      patch.turnstile_sitekey_override = body.turnstile_sitekey_override.trim();
+      // 允许清空；sitekey 会被分享页写进 HTML 属性，只接受纯字母数字形态
+      const sk = body.turnstile_sitekey_override.trim();
+      if (sk !== "" && !/^[A-Za-z0-9_-]{10,100}$/.test(sk)) {
+        return json({ error: "invalid_turnstile_sitekey" }, 400);
+      }
+      patch.turnstile_sitekey_override = sk;
     }
     // Turnstile Secret —— 如果 Modal 里传了新密码则加密存；空字符串则清掉；__keep__ 表示保留
     if (typeof body.turnstile_secret === "string") {
@@ -1267,6 +1326,25 @@ export async function handleAdminApi(
     // 管理员 IP 白名单
     if (typeof body.admin_ips === "string") {
       patch.admin_ips = body.admin_ips.trim();
+    }
+
+    // ── WebDAV 挂载 ──
+    if (typeof body.webdav_enabled === "boolean") patch.webdav_enabled = body.webdav_enabled ? "1" : "0";
+    if (typeof body.webdav_username === "string") {
+      const u = body.webdav_username.trim().slice(0, 64);
+      if (u && !/^[A-Za-z0-9._@-]+$/.test(u)) {
+        return json({ error: msg(req, "用户名只允许字母、数字与 . _ @ -", "Username may only contain letters, digits and . _ @ -") }, 400);
+      }
+      if (u) patch.webdav_username = u;
+    }
+    if (typeof body.webdav_password === "string") {
+      // 空串 = 清掉口令（没有口令时 WebDAV 一律拒绝，等于关掉访问能力）
+      if (body.webdav_password === "") patch.webdav_password_hash = "";
+      else if (body.webdav_password.length < 8 || body.webdav_password.length > 256) {
+        return json({ error: msg(req, "WebDAV 口令需 8-256 位", "WebDAV password must be 8-256 characters") }, 400);
+      } else {
+        patch.webdav_password_hash = await hashWebDAVPassword(body.webdav_password);
+      }
     }
 
     // 下载市场作为首页
@@ -1313,8 +1391,6 @@ export async function handleAdminApi(
     }
 
     await updateSettings(env, patch);
-    // storage 配置变了，清掉缓存的 storage provider 让下次请求用新配置
-    _storagePromise = null;
 
     // 单 IP 上限调成不限 / 关掉自动封禁后，要顺手解除此前自动封禁的 IP：
     // 下载入口先查 banned_ips 再看限额，否则管理员会以为设置没生效
@@ -1901,11 +1977,13 @@ export async function handleAdminApi(
 
   return json({ error: "not_found" }, 404);
   } catch (e: any) {
-    console.error("[handleAdminApi]", e?.stack || e);
+    // 堆栈与原始异常只进 Worker 日志；浏览器那边只拿一次性 ref，避免内部路径外露
+    const ref = randomId(6);
+    console.error(`[handleAdminApi ref=${ref}]`, e?.stack || e);
     return json({
       error: "server_error",
-      message: String(e?.message ?? e),
-      stack: (e?.stack || "").split("\n").slice(0, 8).join("\n"),
+      ref,
+      message: msg(req, `服务端错误（ref=${ref}），请到 Worker 日志查询`, `Server error (ref=${ref}); see Worker logs`),
     }, 500);
   }
 }

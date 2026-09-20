@@ -6,19 +6,7 @@ import { findCodeByString, checkCodeUsable, activateCodeIfNeeded, deductQuota, f
 import { errorPage, json } from "./pages";
 import { hmacHex, sha256Hex, randomHex, safeEqual, decryptSecret } from "./crypto";
 import { verifyOAuthSession } from "./oauth";
-import { createStorageProvider, type StorageProvider } from "./storage";
-
-/** 懒加载 StorageProvider —— 和 admin.ts 类似 */
-let _storagePromise: Promise<StorageProvider> | null = null;
-async function storage(env: Env): Promise<StorageProvider> {
-  if (!_storagePromise) {
-    _storagePromise = (async () => {
-      const s = await getSettings(env);
-      return createStorageProvider(env, s);
-    })();
-  }
-  return _storagePromise;
-}
+import { getStorageProvider as storage } from "./storage";
 
 const TOKEN_TTL_MS = 24 * 3600_000; // 授权令牌有效期 24h
 
@@ -352,15 +340,6 @@ export async function handleDownload(
   if (row.max_downloads && row.download_count >= row.max_downloads) return errorPage(req, 410, { zh: "下载次数已达上限", en: "Download Limit Reached" },
     { zh: `该资源允许下载 ${row.max_downloads} 次，名额已用完。`, en: `Download limit (${row.max_downloads}) reached.` });
 
-  if (row.max_downloads) {
-    const r = await env.db.prepare(
-      `UPDATE shares SET download_count = download_count + 1 WHERE id = ?1 AND download_count < ?2`
-    ).bind(token, row.max_downloads).run();
-    if ((r.meta.changes ?? 0) === 0)
-      return errorPage(req, 410, { zh: "下载次数已达上限", en: "Download Limit Reached" },
-        { zh: `名额已用完。`, en: `Quota used up.` });
-  }
-
   if (row.password_hash && !(await verifyShareToken(env, token, new URL(req.url).search))) {
     return errorPage(req, 403, { zh: "需要访问密码", en: "Password Required" },
       { zh: "该分享受密码保护。", en: "This share is password-protected." });
@@ -431,12 +410,26 @@ export async function handleDownload(
     }
   }
 
+  // 名额必须在所有闸门之后占用：被密码/验证码/流量限额/重复下载挡掉的请求不该烧掉它
+  if (row.max_downloads) {
+    const r = await env.db.prepare(
+      `UPDATE shares SET download_count = download_count + 1 WHERE id = ?1 AND download_count < ?2`
+    ).bind(token, row.max_downloads).run();
+    if ((r.meta.changes ?? 0) === 0)
+      return errorPage(req, 410, { zh: "下载次数已达上限", en: "Download Limit Reached" },
+        { zh: `名额已用完。`, en: `Quota used up.` });
+  } else {
+    // 无上限也要计数，否则后台与市场的"已下载次数"永远是 0
+    await env.db.prepare(`UPDATE shares SET download_count = download_count + 1 WHERE id = ?1`)
+      .bind(token).run();
+  }
+
   return streamFile(req, env, ctx, row, token, "share");
 }
 
 /**
  * GET /d/:id —— 直链下载（独立入口，走 direct_links 表）
- * 轻量鉴权：封禁 → 过期/撤销/次数 → 原子扣次 → 流量限额 → 重复下载
+ * 轻量鉴权：封禁 → 过期/撤销/次数 → 流量限额 → 重复下载 → 原子扣次 → 推流
  * 不走密码/Turnstile/OAuth（直链设计就是"拿了就能下"）
  */
 export async function handleDirectDownload(
@@ -490,15 +483,6 @@ export async function handleDirectDownload(
   if (row.max_downloads && row.download_count >= row.max_downloads) return errorPage(req, 410, { zh: "下载次数已达上限", en: "Download Limit Reached" },
     { zh: `名额已用完。`, en: `Quota used up.` });
 
-  if (row.max_downloads) {
-    const r = await env.db.prepare(
-      `UPDATE direct_links SET download_count = download_count + 1 WHERE id = ?1 AND download_count < ?2`
-    ).bind(token, row.max_downloads).run();
-    if ((r.meta.changes ?? 0) === 0)
-      return errorPage(req, 410, { zh: "下载次数已达上限", en: "Download Limit Reached" },
-        { zh: `名额已用完。`, en: `Quota used up.` });
-  }
-
   {
     const whitelisted = isAdminWhitelisted(ip, settings.adminIps);
     const usingCode = !!codeRow;
@@ -530,6 +514,19 @@ export async function handleDirectDownload(
           { siteTitle: settings.siteTitle });
       }
     }
+  }
+
+  // 名额必须在所有闸门之后占用（同上：被限流挡掉的请求不该烧次数）
+  if (row.max_downloads) {
+    const r = await env.db.prepare(
+      `UPDATE direct_links SET download_count = download_count + 1 WHERE id = ?1 AND download_count < ?2`
+    ).bind(token, row.max_downloads).run();
+    if ((r.meta.changes ?? 0) === 0)
+      return errorPage(req, 410, { zh: "下载次数已达上限", en: "Download Limit Reached" },
+        { zh: `名额已用完。`, en: `Quota used up.` });
+  } else {
+    await env.db.prepare(`UPDATE direct_links SET download_count = download_count + 1 WHERE id = ?1`)
+      .bind(token).run();
   }
 
   return streamFile(req, env, ctx, row, token, "direct");

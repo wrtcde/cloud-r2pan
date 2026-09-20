@@ -13,26 +13,20 @@
  *   COPY      —— 复制文件或目录
  *
  * 认证：HTTP Basic Auth，用户名密码在管理后台设置（settings.webdav_username / webdav_password_hash）
+ *   口令以 PBKDF2-SHA256 存储（老格式单轮 sha256 在下次成功登录时就地升级）；
+ *   每个 IP 每分钟允许 8 次失败，超限后直接拒绝而不再做口令派生（省 CPU）；
+ *   验证通过的凭据在本 isolate 缓存 60 秒，避免挂载后的每个请求都重跑一遍拉伸。
+ * 上传：与服务端 limits 一致——单文件上限与总配额都在 PUT 里强制，超限回滚已写入的对象。
  * 存储：复用 StorageProvider（R2 / S3），文件元数据存 D1 files 表，目录存 directories 表
  */
 
 import type { Env } from "./types";
-import { getSettings } from "./settings";
-import { sha256Hex, safeEqual, randomHex } from "./crypto";
-import { createStorageProvider, type StorageProvider } from "./storage";
+import { getSettings, updateSettings } from "./settings";
+import { sha256Hex, hashWebDAVPassword, verifyWebDAVPassword } from "./crypto";
+import { clientIp, authThrottled, noteAuthFailure, clearAuthFailures } from "./auth";
+import { declaredSize, formatMb, postUploadRejection, preUploadRejection, usedStorageBytes } from "./limits";
+import { getStorageProvider as storage } from "./storage";
 import { randomId } from "./db";
-
-/* ═══════════ 懒加载 StorageProvider ═══════════ */
-let _storagePromise: Promise<StorageProvider> | null = null;
-async function storage(env: Env): Promise<StorageProvider> {
-  if (!_storagePromise) {
-    _storagePromise = (async () => {
-      const s = await getSettings(env);
-      return createStorageProvider(env, s);
-    })();
-  }
-  return _storagePromise;
-}
 
 /* ═══════════ 工具函数 ═══════════ */
 
@@ -88,23 +82,53 @@ function parseBasicAuth(authHeader: string | null): { username: string; password
 }
 
 /** 验证 WebDAV Basic Auth */
+const WEBDAV_FAIL_LIMIT = 8;          // 每个 IP 每分钟允许的失败次数
+const CRED_CACHE_TTL_MS = 60_000;
+/** 凭据 → 过期时间戳。口令派生是 PBKDF2 五万轮，而挂载后每个请求都要认证。 */
+const credCache = new Map<string, number>();
+
 async function checkWebDAVAuth(req: Request, env: Env): Promise<boolean> {
   const settings = await getSettings(env);
   if (!settings.webdavEnabled) return false;
-  if (!settings.webdavPasswordHash) return false;
+  const stored = settings.webdavPasswordHash;
+  if (!stored) return false;
 
   const auth = parseBasicAuth(req.headers.get("authorization"));
+  // 没带凭据是正常挑战流程，不能计成失败
   if (!auth) return false;
-  if (auth.username !== settings.webdavUsername) return false;
 
-  // 密码校验：salt:sha256(salt:password)
-  const stored = settings.webdavPasswordHash;
-  const i = stored.indexOf(":");
-  if (i < 0) return false;
-  const salt = stored.slice(0, i);
-  const want = stored.slice(i + 1);
-  const got = await sha256Hex(salt + ":" + auth.password);
-  return safeEqual(want, got);
+  // 键里带上存储哈希的尾部指纹：管理员换口令后指纹变化，旧缓存自动失效
+  const cacheKey = (await sha256Hex(auth.username + ":" + auth.password)) + "|" + stored.slice(-16);
+  const cachedUntil = credCache.get(cacheKey);
+  if (cachedUntil && cachedUntil > Date.now()) return true; // 已验证过，不必再派生
+
+  const ip = clientIp(req);
+  if (authThrottled(ip, "webdav", WEBDAV_FAIL_LIMIT)) return false; // 超限后连派生都不做
+
+  if (auth.username !== settings.webdavUsername) {
+    noteAuthFailure(ip, "webdav");
+    return false;
+  }
+
+  const { ok, needUpgrade } = await verifyWebDAVPassword(stored, auth.password);
+  if (!ok) {
+    noteAuthFailure(ip, "webdav");
+    return false;
+  }
+  clearAuthFailures(ip, "webdav");
+  // 键里带着客户端提交的凭据，被人拿不同口令刷就会无限增长，先清掉过期的
+  if (credCache.size > 200) {
+    const now = Date.now();
+    for (const [k, until] of credCache) if (until <= now) credCache.delete(k);
+  }
+  credCache.set(cacheKey, Date.now() + CRED_CACHE_TTL_MS);
+
+  // 老格式（单轮 sha256，可离线爆破）或迭代数偏低时，顺手就地升级
+  if (needUpgrade) {
+    const upgraded = await hashWebDAVPassword(auth.password);
+    await updateSettings(env, { webdav_password_hash: upgraded }).catch(() => {});
+  }
+  return true;
 }
 
 /* ═══════════ 数据库辅助查询 ═══════════ */
@@ -570,12 +594,24 @@ async function handleWebDavPut(
   const mime = req.headers.get("content-type") || "application/octet-stream";
   const st = await storage(env);
 
+  // 服务端闸门：客户端的 Content-Length 只是预检，真实大小以存储层返回为准
+  const limits = await getSettings(env);
+  const declared = declaredSize(req);
+  const usedBytes = limits.storageQuotaBytes > 0 ? await usedStorageBytes(env) : 0;
+  const rejected = preUploadRejection(limits, usedBytes, declared);
+  if (rejected) {
+    return new Response(rejected.code === "too_large"
+      ? `Payload Too Large: per-file limit is ${formatMb(rejected.limitBytes)} MB`
+      : `Insufficient Storage: quota is ${formatMb(rejected.limitBytes)} MB`, { status: rejected.status });
+  }
+
   // 生成文件记录
   const id = randomId(14);
   const key = `files/${id}`;
   const now = Date.now();
 
   let size = 0;
+  // req.body 必须原样交给存储层：R2 只接受长度已知的流，pipeThrough 包一层计数流会被直接拒绝
   try {
     const res = await st.put(key, req.body as any, {
       contentType: mime,
@@ -583,22 +619,20 @@ async function handleWebDavPut(
     });
     size = res.size;
   } catch (err: any) {
+    await st.delete(key).catch(() => {});
     return new Response(`Storage error: ${err?.message || err}`, { status: 502 });
+  }
+
+  const over = postUploadRejection(limits, usedBytes, size);
+  if (over) {
+    await st.delete(key).catch(() => {});
+    return new Response(over.code === "too_large"
+      ? `Payload Too Large: per-file limit is ${formatMb(over.limitBytes)} MB`
+      : `Insufficient Storage: quota is ${formatMb(over.limitBytes)} MB`, { status: over.status });
   }
 
   // 检查是否已存在同名文件（覆盖）
   const existing = await findFile(env, dir, name);
-  if (existing) {
-    // 删除旧文件 + 关联的 shares
-    try {
-      await env.db.batch([
-        env.db.prepare("DELETE FROM shares WHERE file_id = ?1").bind(existing.id),
-        env.db.prepare("DELETE FROM download_logs WHERE file_id = ?1").bind(existing.id),
-        env.db.prepare("DELETE FROM files WHERE id = ?1").bind(existing.id),
-      ]);
-      await st.delete(existing.key).catch(() => {});
-    } catch { /* 忽略清理失败 */ }
-  }
 
   // 插入新文件记录
   const fullPath = dir === "/" ? `/${name}` : `${dir}/${name}`;
@@ -612,7 +646,20 @@ async function handleWebDavPut(
     return new Response(`DB error: ${err?.message || err}`, { status: 502 });
   }
 
-  return new Response("", {
+  // 覆盖上传：新行写成功了才退掉旧行，反过来会在插入失败时把旧文件一起弄丢
+  if (existing) {
+    try {
+      await env.db.batch([
+        env.db.prepare("DELETE FROM shares WHERE file_id = ?1").bind(existing.id),
+        env.db.prepare("DELETE FROM direct_links WHERE file_id = ?1").bind(existing.id),
+        env.db.prepare("DELETE FROM download_logs WHERE file_id = ?1").bind(existing.id),
+        env.db.prepare("DELETE FROM files WHERE id = ?1").bind(existing.id),
+      ]);
+      await st.delete(existing.key).catch(() => {});
+    } catch { /* 忽略清理失败 */ }
+  }
+
+  return new Response(null, {
     status: existing ? 204 : 201,
     headers: { "ETag": `"${id}"` },
   });
@@ -636,11 +683,12 @@ async function handleWebDavDelete(env: Env, internalPath: string): Promise<Respo
       const st = await storage(env);
       await env.db.batch([
         env.db.prepare("DELETE FROM shares WHERE file_id = ?1").bind(file.id),
+        env.db.prepare("DELETE FROM direct_links WHERE file_id = ?1").bind(file.id),
         env.db.prepare("DELETE FROM download_logs WHERE file_id = ?1").bind(file.id),
         env.db.prepare("DELETE FROM files WHERE id = ?1").bind(file.id),
       ]);
       await st.delete(file.key).catch(() => {});
-      return new Response("", { status: 204 });
+      return new Response(null, { status: 204 });
     }
   }
 
@@ -657,6 +705,7 @@ async function handleWebDavDelete(env: Env, internalPath: string): Promise<Respo
     for (const f of files) {
       await env.db.batch([
         env.db.prepare("DELETE FROM shares WHERE file_id = ?1").bind(f.id),
+        env.db.prepare("DELETE FROM direct_links WHERE file_id = ?1").bind(f.id),
         env.db.prepare("DELETE FROM download_logs WHERE file_id = ?1").bind(f.id),
         env.db.prepare("DELETE FROM files WHERE id = ?1").bind(f.id),
       ]);
@@ -666,7 +715,7 @@ async function handleWebDavDelete(env: Env, internalPath: string): Promise<Respo
     // 删除目录本身（directories 表）
     await env.db.prepare("DELETE FROM directories WHERE path = ?1").bind(internalPath).run();
 
-    return new Response("", { status: 204 });
+    return new Response(null, { status: 204 });
   }
 
   return new Response("Not Found", { status: 404 });
@@ -765,7 +814,7 @@ async function handleWebDavMove(
     await moveDirectory(env, internalPath, destPath);
   }
 
-  return new Response("", { status: destExists || destFile ? 204 : 201 });
+  return new Response(null, { status: destExists || destFile ? 204 : 201 });
 }
 
 /* ═══════════ COPY ═══════════ */

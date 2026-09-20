@@ -357,6 +357,8 @@ a.btn { text-decoration: none; }
   .dl-link { max-width: 92px; }
   .tbl-recent th:nth-child(4), .tbl-recent td:nth-child(4) { display: none; }
   .tbl-wide th:nth-child(4), .tbl-wide td:nth-child(4) { display: none; }
+  /* 分享表多了「市场」列（第 4 列）：≤720px 的通配规则已把第 5 列起全部收起，
+     这里再单独收起市场列，小屏可见列维持 文件/链接/操作 */
   .tbl-shares th:nth-child(4), .tbl-shares td:nth-child(4) { display: none; }
   .actions-cell { flex-direction: column; gap: 4px; }
   .dropzone { padding: 24px 14px; }
@@ -413,13 +415,13 @@ const I18N = {
     colExpires: '有效期', colStatus: '状态', colReason: '原因', colBannedAt: '封禁时间', colUntil: '到期',
     // 文件
     dropTitle: '拖拽文件到此处，或点击上传',
-    dropDesc: '单文件最大 100 MB（Workers 请求限制）· 直传 R2 对象存储',
+    dropDesc: '单文件最大 {mb} MB（服务端强制校验）· 直传 R2 对象存储',
     allFiles: '全部文件', noFiles: '还没有文件，上传一个试试', createShare: '创建分享', dlFile: '下载', del: '删除',
     newFolder: '新建文件夹', folderNamePh: '文件夹名称', folderNameEmpty: '文件夹名不能为空',
     folderFilterAll: '全部位置', folderFilterRoot: '根目录', colFolder: '位置', uploadToRoot: '根目录',
     uploadTo: '上传到：{where}', deleteFolder: '删除文件夹', deleteFolderT: '删除文件夹', deleteFolderD: '删除文件夹「{name}」？其中的文件将移回根目录，不会被删除。',
     folderDeleted: '文件夹已删除', folderCreatedToast: '已创建文件夹「{name}」',
-    tooLarge: '「{name}」超过 100 MB 限制', uploadOk: '「{name}」上传成功', uploadFail: '「{name}」上传失败',
+    tooLarge: '「{name}」超过 {mb} MB 限制', uploadOk: '「{name}」上传成功', uploadFail: '「{name}」上传失败',
     uploadDone: '完成 ✅', uploadFailShort: '失败',
     // 分享弹窗
     shareModalTitle: '创建分享链接', shareModalSub: '生成公开下载链接，可设置有效期与下载次数上限',
@@ -435,10 +437,17 @@ const I18N = {
     directLinkLabel: '直链（/d/xxx，跳过分享页直接下载）',
     directLinkNone: '直链不带密码校验，所以受密码保护的分享不生成直链。',
     preview: '预览分享页',
+    shareModalMarket: '上架到下载市场',
+    shareModalMarketD: '下载市场是公开首页，任何人都能浏览并下载。设了访问密码的分享不能上架。',
+    marketTitlePh: '市场标题（可选，默认用文件名）', marketDescPh: '一句话描述（可选）',
     // 分享列表
     sharesTitle: '分享链接', cleanup: '清理失效分享',
+    marketCol: '市场', marketOff: '下架', marketOnBtn: '上架',
+    marketOnToast: '已上架到下载市场', marketOffToast: '已从下载市场下架',
+    marketNeedNoPassword: '带访问密码的分享不能上架到下载市场（市场里会隐藏它），请先去掉密码',
     stActive: '有效', stExpired: '已过期', stRevoked: '已撤销', stMaxed: '已满额',
     revoke: '撤销', noShares: '还没有分享链接，去「文件」页创建一个',
+    sharesMore: '加载更多（还有 {n} 条）',
     confirmCleanupT: '清理失效分享', confirmCleanupD: '将删除所有已过期、已撤销、已达下载上限的分享链接。',
     cleanedN: '已清理 {n} 条失效分享', shareRevoked: '分享已撤销',
     confirmRevokeT: '撤销分享', confirmRevokeD: '撤销后该链接将立即失效，无法恢复。',
@@ -519,11 +528,22 @@ const I18N = {
     ipWhitelistOn: '已启用',
     ipWhitelistOff: '未启用（任何 IP 都能访问 /admin）',
     ipWhitelistHint: '格式：每行一个条目 或 用逗号分隔。例：192.168.1.1, 10.0.0.0/8, 203.0.113.0/24',
+    // 上传体积与存储配额
+    maxUpload: '单文件上限（MB）',
+    maxUploadD: '服务端会真的拦下超限上传（413）：写入完成后按对象真实字节数复核，谎报体积无效。0 表示不设上限（仍受存储配额约束）。',
+    storageQuota: '总存储配额（MB）',
+    storageQuotaD: '按已用存储判断，超限的上传会被拒绝并回滚（507）；0 表示不限。',
+    // WebDAV 挂载
+    webdav: 'WebDAV 挂载',
+    webdavD: '开启后可用 macOS 访达 / Windows 资源管理器 / Raidrive 等把网盘直接挂载成本地磁盘。用户名和口令就是访问凭据，请设为长随机值。',
+    webdavUser: '挂载用户名', webdavPwSet: '已设置（留空表示不修改）', webdavPwPh: '至少 8 位',
+    webdavPwClear: '清除口令', webdavOff: '未开启：/webdav 一律返回 401', webdavOn: '已开启',
+    webdavMount: '挂载地址：{url}', webdavSavedToast: 'WebDAV 设置已保存',
     // 下载市场首页
     homeRedirectMarket: '下载市场作为首页',
     homeRedirectMarketD: '访客直接访问域名根路径 / 时，自动跳转到下载市场页面（/market）而不是管理后台（/admin）',
     homeRedirectMarketHint: '默认关闭。开启后，您的站点首页就是下载市场，普通访客无法直接看到 /admin。管理员仍然可以通过 /admin 显式访问后台。',
-    codesFloatingBtn: '🎟️ 激活码浮动按钮',
+    codesFloatingBtn: '激活码浮动按钮',
     codesFloatingBtnD: '在分享页右上角（或左上角）显示一个卡片图标，用户点击后可绑定激活码、查询额度、解绑',
     codesFloatingBtnHint: '默认开启。关闭后用户只能通过 URL 参数 ?code=XXX 携带激活码（不推荐）',
     codesFloatingBtnPosition: '按钮位置',
@@ -608,7 +628,7 @@ const I18N = {
     oauthNoProviders: '还没有配置任何 OAuth2 Provider',
     oauthEnabledN: '已启用 {n} 个 Provider',
     oauthNoEnabled: '总开关已打开，但没有启用任何 Provider',
-    oauthDisabled: '未启用',
+    oauthDisabled: '未启用', oauthEnabled: '已启用',
     oauthConfigure: '⚙️ 配置',
     oauthEnable: '启用',
     oauthDisable: '禁用',
@@ -717,13 +737,13 @@ const I18N = {
     colExpires: 'Expires', colStatus: 'Status', colReason: 'Reason', colBannedAt: 'Banned at', colUntil: 'Until',
     // 文件
     dropTitle: 'Drop files here or click to upload',
-    dropDesc: 'Max 100 MB per file (Workers limit) · Stored directly in R2',
+    dropDesc: 'Max {mb} MB per file (enforced server-side) · Stored directly in R2',
     allFiles: 'All Files', noFiles: 'No files yet — upload one to get started', createShare: 'Share', dlFile: 'Download', del: 'Delete',
     newFolder: 'New Folder', folderNamePh: 'Folder name', folderNameEmpty: 'Folder name is required',
     folderFilterAll: 'All Locations', folderFilterRoot: 'Root', colFolder: 'Location', uploadToRoot: 'Root',
     uploadTo: 'Upload to: {where}', deleteFolder: 'Delete Folder', deleteFolderT: 'Delete Folder', deleteFolderD: 'Delete folder "{name}"? Files inside will be moved back to Root, not deleted.',
     folderDeleted: 'Folder deleted', folderCreatedToast: 'Folder "{name}" created',
-    tooLarge: '"{name}" exceeds the 100 MB limit', uploadOk: '"{name}" uploaded', uploadFail: '"{name}" upload failed',
+    tooLarge: '"{name}" exceeds the {mb} MB limit', uploadOk: '"{name}" uploaded', uploadFail: '"{name}" upload failed',
     uploadDone: 'Done ✅', uploadFailShort: 'Failed',
     // 分享弹窗
     shareModalTitle: 'Create Share Link', shareModalSub: 'Generate a public download link with optional expiry and download cap',
@@ -739,10 +759,17 @@ const I18N = {
     directLinkLabel: 'Direct link (/d/xxx — skips share page)',
     directLinkNone: 'Direct links carry no password, so password-protected shares don’t get one.',
     preview: 'Preview',
+    shareModalMarket: 'List on the marketplace',
+    shareModalMarketD: 'The marketplace is a public homepage anyone can browse and download from. Password-protected shares cannot be listed.',
+    marketTitlePh: 'Market title (optional, defaults to the file name)', marketDescPh: 'One-line description (optional)',
     // 分享列表
     sharesTitle: 'Share Links', cleanup: 'Clean up expired',
+    marketCol: 'Market', marketOff: 'Unlist', marketOnBtn: 'List',
+    marketOnToast: 'Listed on the marketplace', marketOffToast: 'Removed from the marketplace',
+    marketNeedNoPassword: 'Password-protected shares cannot be listed (the marketplace hides them) — remove the password first',
     stActive: 'Active', stExpired: 'Expired', stRevoked: 'Revoked', stMaxed: 'Maxed out',
     revoke: 'Revoke', noShares: 'No share links yet — create one in Files',
+    sharesMore: 'Load more ({n} more)',
     confirmCleanupT: 'Clean up expired shares', confirmCleanupD: 'This will delete all expired, revoked and maxed-out share links.',
     cleanedN: 'Cleaned up {n} expired shares', shareRevoked: 'Share revoked',
     confirmRevokeT: 'Revoke share', confirmRevokeD: 'The link will stop working immediately. This cannot be undone.',
@@ -823,11 +850,22 @@ const I18N = {
     ipWhitelistOn: 'Enabled',
     ipWhitelistOff: 'Not enabled (any IP can access /admin)',
     ipWhitelistHint: 'Format: one per line OR comma-separated. e.g. 192.168.1.1, 10.0.0.0/8, 203.0.113.0/24',
+    // Upload size & storage quota
+    maxUpload: 'Per-file Limit (MB)',
+    maxUploadD: 'Oversized uploads really are rejected server-side (413): the stored object is re-checked by actual bytes, so lying about the size does not work. 0 = no cap (storage quota still applies).',
+    storageQuota: 'Storage Quota (MB)',
+    storageQuotaD: 'Uploads that would exceed the quota are refused and rolled back (507). 0 = unlimited.',
+    // WebDAV mount
+    webdav: 'WebDAV Mount',
+    webdavD: 'When enabled, mount the drive from Finder / Explorer / Raidrive. The username and password below are the credentials — use a long random value.',
+    webdavUser: 'Mount username', webdavPwSet: 'Set (leave blank to keep)', webdavPwPh: 'at least 8 chars',
+    webdavPwClear: 'Clear password', webdavOff: 'Off — /webdav returns 401', webdavOn: 'On',
+    webdavMount: 'Mount URL: {url}', webdavSavedToast: 'WebDAV settings saved',
     // Marketplace as home
     homeRedirectMarket: 'Marketplace as Homepage',
     homeRedirectMarketD: 'When visitors land on your root domain /, redirect them to the marketplace (/market) instead of the admin panel (/admin)',
     homeRedirectMarketHint: 'Off by default. When enabled, your site homepage becomes the marketplace. Admins can still reach /admin explicitly.',
-    codesFloatingBtn: '🎟️ Activation Code Floating Button',
+    codesFloatingBtn: 'Activation Code Floating Button',
     codesFloatingBtnD: 'Show a card icon on the share page corner. Users can bind/unbind their code and check balance by clicking it.',
     codesFloatingBtnHint: 'On by default. When off, users can only use activation codes via the URL parameter ?code=XXX (not recommended).',
     codesFloatingBtnPosition: 'Position',
@@ -911,7 +949,7 @@ const I18N = {
     oauthNoProviders: 'No OAuth2 providers configured yet',
     oauthEnabledN: '{n} provider(s) enabled',
     oauthNoEnabled: 'Master switch is ON but no provider is enabled',
-    oauthDisabled: 'Disabled',
+    oauthDisabled: 'Disabled', oauthEnabled: 'Enabled',
     oauthConfigure: '⚙️ Configure',
     oauthEnable: 'Enable',
     oauthDisable: 'Disable',
@@ -1105,6 +1143,7 @@ function closeModal(){ $('#modal')?.remove(); }
 
 /* ═══════════ 登录视图（支持 2FA 两阶段） ═══════════ */
 let siteTitle = 'cloud-r2pan';
+let maxUploadMb = 100; // 服务端下发的单文件上限，取到会话后刷新
 let loginStage = 'password'; // 'password' | '2fa' | 'recovery'
 let savedLoginKey = ''; // 第一阶段输入的 admin key
 
@@ -1241,6 +1280,7 @@ async function showApp(){
   try{
     const s = await api('/api/admin/session');
     siteTitle = s.site_title || siteTitle;
+    if (s.max_upload_mb) maxUploadMb = s.max_upload_mb;
   }catch{}
   document.title = t('docTitle', {site: siteTitle});
   $('#app').innerHTML = `
@@ -1435,7 +1475,7 @@ async function loadFiles(){
     <div class="dropzone" id="dropzone">
       <div class="icon">☁️</div>
       <div class="t">${esc(t('dropTitle'))}</div>
-      <div class="d">${esc(t('dropDesc'))}</div>
+      <div class="d">${esc(t('dropDesc', { mb: maxUploadMb }))}</div>
       <input type="file" id="file-input" multiple hidden>
     </div>
     <div id="upload-list"></div>
@@ -1562,7 +1602,7 @@ function openNewFolderModal(){
 
 function uploadFiles(files){
   for(const file of files){
-    if(file.size > 100 * 1024 * 1024){ toast(t('tooLarge', {name: file.name}), 'err'); continue; }
+    if(maxUploadMb > 0 && file.size > maxUploadMb * 1024 * 1024){ toast(t('tooLarge', {name: file.name, mb: maxUploadMb}), 'err'); continue; }
     const item = document.createElement('div');
     item.className = 'upload-item glass';
     item.innerHTML = `${ficon(file.name)}<span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(file.name)}</span>
@@ -1613,6 +1653,17 @@ function openShareModal(fileId){
       <div class="tip">${esc(t('downloadNameHint'))}</div>
     </div>
     <div class="field">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+        <span style="font-size:13px;font-weight:600;color:var(--text-2)">🏪 ${esc(t('shareModalMarket'))}</span>
+        <label class="switch"><input type="checkbox" id="sh-market"><span class="track"><span class="thumb"></span></span></label>
+      </div>
+      <div class="tip">${esc(t('shareModalMarketD'))}</div>
+      <div id="sh-market-fields" style="display:none;margin-top:8px">
+        <input type="text" id="sh-mkt-title" placeholder="${esc(t('marketTitlePh'))}" maxlength="80" autocomplete="off" style="margin-bottom:8px">
+        <input type="text" id="sh-mkt-desc" placeholder="${esc(t('marketDescPh'))}" maxlength="200" autocomplete="off">
+      </div>
+    </div>
+    <div class="field">
       <label>${esc(t('maxDownloadsLabel'))}</label>
       <input type="number" id="sh-max" min="0" placeholder="${esc(t('unlimitedPlaceholder'))}">
       <div class="tip">${esc(t('maxTip'))}</div>
@@ -1622,13 +1673,22 @@ function openShareModal(fileId){
       <button class="btn primary" id="sh-create">${esc(t('generate'))}</button>
     </div>`);
   $('[data-x]').onclick = closeModal;
+  const mkBox = $('#sh-market');
+  mkBox.onchange = () => { $('#sh-market-fields').style.display = mkBox.checked ? 'block' : 'none'; };
   $('#sh-create').onclick = async () => {
     const exp = Number($('#sh-exp').value) || null;
     const max = Number($('#sh-max').value) || null;
     const password = $('#sh-pwd').value.trim() || null;
     const download_name = $('#sh-dlname').value.trim() || null;
+    const is_market = mkBox.checked;
+    if (is_market && password) { toast(t('marketNeedNoPassword'), 'err'); return; }
     try{
-      const r = await api('/api/admin/shares', { method:'POST', body: JSON.stringify({ file_id: fileId, expires_hours: exp, max_downloads: max, password, download_name }) });
+      const r = await api('/api/admin/shares', { method:'POST', body: JSON.stringify({
+        file_id: fileId, expires_hours: exp, max_downloads: max, password, download_name,
+        is_market,
+        market_title: is_market ? ($('#sh-mkt-title').value.trim() || null) : null,
+        market_desc: is_market ? ($('#sh-mkt-desc').value.trim() || null) : null,
+      }) });
       const url = location.origin + r.url;
       const directUrl = r.direct_url ? location.origin + r.direct_url : null;
       openModal(`
@@ -1664,34 +1724,43 @@ function openShareModal(fileId){
 }
 
 /* ═══════════ 分享 ═══════════ */
-async function loadShares(){
-  const { shares } = await api('/api/admin/shares');
+const SHARES_PAGE = 100;
+let sharesRows = [], sharesTotal = 0;
+async function loadShares(mode = 'first'){
+  const limit = mode === 'keep' ? Math.max(SHARES_PAGE, sharesRows.length) : SHARES_PAGE;
+  const offset = mode === 'more' ? sharesRows.length : 0;
+  const d = await api(`/api/admin/shares?limit=${limit}&offset=${offset}`);
+  sharesRows = mode === 'more' ? sharesRows.concat(d.shares || []) : (d.shares || []);
+  sharesTotal = d.total ?? sharesRows.length;
+  const shares = sharesRows;
+  const more = sharesTotal - shares.length;
   const STATUS_KEY = { active:'stActive', expired:'stExpired', revoked:'stRevoked', maxed:'stMaxed' };
   $('#view').innerHTML = `
     <div class="glass section">
-      <div class="section-title"><h2>🔗 ${esc(t('sharesTitle'))}（${shares.length}）</h2>
+      <div class="section-title"><h2>🔗 ${esc(t('sharesTitle'))}（${shares.length}${more > 0 ? ` / ${sharesTotal}` : ''}）</h2>
         <button class="btn sm" id="cleanup-shares">${esc(t('cleanup'))}</button></div>
       ${shares.length ? `
       <div style="overflow-x:auto"><table class="tbl tbl-shares">
-        <thead><tr><th class="name-cell ck-cell">${ckHead}${esc(t('colFile'))}</th><th>${esc(t('colLink'))}</th><th>${esc(t('passwordCol'))}</th><th>${esc(t('colDownloads'))} / ${esc(t('colExpires'))}</th><th>${esc(t('colCreated'))}</th><th>${esc(t('colExpires'))}</th><th>${esc(t('colStatus'))}</th><th style="width:80px">${esc(t('colActions'))}</th></tr></thead>
+        <thead><tr><th class="name-cell ck-cell">${ckHead}${esc(t('colFile'))}</th><th>${esc(t('colLink'))}</th><th>${esc(t('passwordCol'))}</th><th>${esc(t('marketCol'))}</th><th>${esc(t('colDownloads'))} / ${esc(t('colExpires'))}</th><th>${esc(t('colCreated'))}</th><th>${esc(t('colStatus'))}</th><th style="width:80px">${esc(t('colActions'))}</th></tr></thead>
         <tbody>${shares.map(s => {
-          const pw = s.has_password ? (s.password_plain || '') : null;
           return `
           <tr>
             <td class="name-cell ck-cell">${ckbox(s.id)}${ficon(s.file_name)} ${esc(s.file_name)}${s.download_name && s.download_name !== s.file_name ? `<div style="font-size:11px;color:#0f9d58;margin-top:2px">↳ ${esc(s.download_name)}</div>` : ''}</td>
             <td class="mono">${s.has_password?'🔒 ':''}<a href="/s/${s.id}" target="_blank" style="color:#2563eb;text-decoration:none">/s/${s.id}</a>${s.direct_url ? `<br><span style="font-size:10px;color:rgba(29,36,51,.45)">直链 </span><a href="${s.direct_url}" target="_blank" data-direct="${location.origin}${s.direct_url}" class="dl-link" style="color:#b45309;text-decoration:none;font-size:11px">${s.direct_url}</a><button class="btn sm" data-cdirect="${location.origin}${s.direct_url}" style="padding:1px 6px;font-size:10px;margin-left:2px">📋</button>` : ''}</td>
-            <td class="mono">${pw ? `<span id="pw-${s.id}" style="font-family:ui-monospace,'SF Mono',monospace;color:#b45309">••••••</span>
-              <button class="btn sm" data-pw="${s.id}" data-val="${esc(pw)}" style="padding:2px 8px;font-size:11px;margin-left:4px">👁</button>
-              <button class="btn sm" data-cpw="${esc(pw)}" style="padding:2px 8px;font-size:11px">📋</button>` : `<span style="color:var(--text-3)">—</span>`}</td>
-            <td class="num">${s.download_count} / ${s.max_downloads ?? '∞'}</td>
+            <td class="mono">${s.has_password ? `<span id="pw-${s.id}" style="font-family:ui-monospace,'SF Mono',monospace;color:#b45309">••••</span>
+              <button class="btn sm" data-pw="${s.id}" style="padding:2px 6px;font-size:11px;margin-left:2px">👁</button>
+              <button class="btn sm" data-cpw="${s.id}" style="padding:2px 6px;font-size:11px">📋</button>` : `<span style="color:var(--text-3)">—</span>`}</td>
+            <td class="mono" style="text-align:center"><button class="btn sm" data-mkt="${s.id}" data-on="${s.is_market ? '0' : '1'}" title="${esc(t(s.is_market ? 'marketOff' : 'marketOnBtn'))}" style="padding:2px 7px;font-size:14px;${s.is_market ? 'background:rgba(15,157,88,.14);border-color:rgba(15,157,88,.4)' : 'opacity:.55'}">🏪</button></td>
+            <td class="num">${s.download_count} / ${s.max_downloads ?? '∞'}
+              <div style="font-size:11px;color:var(--text-3);margin-top:2px;font-weight:400">${s.expires_at ? fmtTime(s.expires_at) : esc(t('forever'))}</div></td>
             <td class="num">${fmtTime(s.created_at)}</td>
-            <td class="num">${s.expires_at ? fmtTime(s.expires_at) : esc(t('forever'))}</td>
             <td><span class="tag ${s.status}"><i></i>${esc(t(STATUS_KEY[s.status]))}</span></td>
             <td><button class="btn sm danger" data-rv="${s.id}">${esc(t('revoke'))}</button></td>
           </tr>`;
         }).join('')}
         </tbody>
       </table></div>` : `<div class="empty"><div class="icon">🔗</div>${esc(t('noShares'))}</div>`}
+      ${more > 0 ? `<div style="text-align:center;margin-top:12px"><button class="btn sm" id="shares-more">${esc(t('sharesMore', { n: more }))}</button></div>` : ''}
     </div>
     <div class="batch-bar" id="batch-bar">
       <div class="bb-row">
@@ -1704,13 +1773,14 @@ async function loadShares(){
     if(!(await confirmDialog(t('confirmCleanupT'), t('confirmCleanupD'), false))) return;
     const r = await api('/api/admin/shares/cleanup', { method:'POST' });
     toast(t('cleanedN', {n: r.deleted}));
-    loadShares();
+    loadShares('keep');
   };
+  $('#shares-more')?.addEventListener('click', () => loadShares('more'));
   $$('[data-rv]').forEach(b => b.onclick = async () => {
     if(!(await confirmDialog(t('confirmRevokeT'), t('confirmRevokeD')))) return;
     await api(`/api/admin/shares/${b.dataset.rv}`, { method:'DELETE' });
     toast(t('shareRevoked'));
-    loadShares();
+    loadShares('keep');
   });
   wireSelection(selShares, shares.map(s => s.id));
   $('#bb-rv').onclick = async () => {
@@ -1721,26 +1791,49 @@ async function loadShares(){
       const r = await api('/api/admin/shares/batch-revoke', { method:'POST', body: JSON.stringify({ ids }) });
       toast(t('batchRevoked', { n: r.revoked }) + (r.skipped ? t('batchSkipped', { n: r.skipped }) : ''));
       selShares.clear();
-      loadShares();
+      loadShares('keep');
     } catch(e){ toast(e.message, 'err'); }
   };
-  // 密码显示/隐藏
+  // 口令按需单条获取（列表里不再有明文）
+  const fetchPw = async (id) => {
+    const { password } = await api(`/api/admin/shares/${encodeURIComponent(id)}/password`);
+    return password || '';
+  };
   $$('[data-pw]').forEach(b => {
-    b.onclick = () => {
-      const id = b.dataset.pw, val = b.dataset.val;
-      const el = $(`#pw-${id}`);
-      if(el.textContent === '••••••') {
-        el.textContent = val;
+    b.onclick = async () => {
+      const id = b.dataset.pw, el = $(`#pw-${id}`);
+      if (!el) return;
+      if (el.dataset.shown === '1') { el.textContent = '••••'; delete el.dataset.shown; b.textContent = '👁'; return; }
+      try {
+        const v = await fetchPw(id);
+        if (!v) { el.textContent = '—'; return; }
+        el.textContent = v;
+        el.dataset.shown = '1';
         b.textContent = '🙈';
-      } else {
-        el.textContent = '••••••';
-        b.textContent = '👁';
-      }
+      } catch(e) { toast(e.message, 'err'); }
     };
   });
   // 复制密码
   $$('[data-cpw]').forEach(b => {
-    b.onclick = () => copyText(b.dataset.cpw);
+    b.onclick = async () => {
+      try {
+        const v = await fetchPw(b.dataset.cpw);
+        if (v) await copyText(v);
+      } catch(e) { toast(e.message, 'err'); }
+    };
+  });
+  // 上下架下载市场
+  $$('[data-mkt]').forEach(b => {
+    b.onclick = async () => {
+      const id = b.dataset.mkt, turnOn = b.dataset.on === '1';
+      const row = shares.find(s => s.id === id);
+      if (turnOn && row?.has_password) { toast(t('marketNeedNoPassword'), 'err'); return; }
+      try {
+        await api(`/api/admin/shares/${encodeURIComponent(id)}/market`, { method:'PUT', body: JSON.stringify({ is_market: turnOn }) });
+        toast(turnOn ? t('marketOnToast') : t('marketOffToast'));
+        loadShares('keep');
+      } catch(e) { toast(e.message, 'err'); }
+    };
   });
   // 复制直链
   $$('[data-cdirect]').forEach(b => {
@@ -2366,7 +2459,7 @@ async function loadCodesList(){
             <th style="padding:10px 8px">${esc(t('codesColTraffic'))}</th>
             <th style="padding:10px 8px">${esc(t('codesColStatus'))}</th>
             <th style="padding:10px 8px">${esc(t('codesColActivated'))}</th>
-            <th style="padding:10px 8px">${esc(t('codesColActions'))}</th>
+            <th style="padding:10px 8px">${esc(t('colActions'))}</th>
           </tr>
         </thead>
         <tbody>
@@ -2454,6 +2547,16 @@ async function loadSettings(){
     </div>
     <div class="glass group">
       <div class="row">
+        <div class="info"><div class="t">📦 ${esc(t('maxUpload'))}</div><div class="d">${esc(t('maxUploadD'))}</div></div>
+        <input type="number" id="st-max-upload" min="1" max="100" step="1" value="${s.max_upload_mb ?? 100}">
+      </div>
+      <div class="row">
+        <div class="info"><div class="t">🗄️ ${esc(t('storageQuota'))}</div><div class="d">${esc(t('storageQuotaD'))}</div></div>
+        <input type="number" id="st-quota" min="0" step="100" value="${s.storage_quota_mb ?? 0}">
+      </div>
+    </div>
+    <div class="glass group">
+      <div class="row">
         <div class="info"><div class="t">🔁 ${esc(t('perIp'))}</div>
         <div class="d">${esc(t('perIpD'))}</div></div>
         <input type="number" id="st-perip" min="0" value="${s.max_downloads_per_ip}">
@@ -2491,13 +2594,32 @@ async function loadSettings(){
         </div>
       </div>
     </div>
+    <!-- WebDAV 挂载 -->
+    <div class="glass group">
+      <div class="row">
+        <div class="info"><div class="t">🗂️ ${esc(t('webdav'))}</div><div class="d">${esc(t('webdavD'))}</div></div>
+        <label class="switch">
+          <input type="checkbox" id="st-webdav-on" ${s.webdav_enabled ? 'checked' : ''}>
+          <span class="track"><span class="thumb"></span></span>
+        </label>
+      </div>
+      <div class="row" style="margin-top:10px;flex-wrap:wrap;gap:8px">
+        <input type="text" id="st-webdav-user" value="${esc(s.webdav_username ?? 'webdav')}" placeholder="${esc(t('webdavUser'))}" maxlength="64" autocomplete="off" style="flex:1 1 150px;min-width:0;padding:10px 12px;border-radius:12px;font-size:13px;color:#1d2433;background:#f3f5f9;border:1px solid rgba(24,34,58,.12);outline:none">
+        <input type="password" id="st-webdav-pw" value="" placeholder="${s.webdav_has_password ? esc(t('webdavPwSet')) : esc(t('webdavPwPh'))}" maxlength="256" autocomplete="new-password" style="flex:1 1 150px;min-width:0;padding:10px 12px;border-radius:12px;font-size:13px;color:#1d2433;background:#f3f5f9;border:1px solid rgba(24,34,58,.12);outline:none">
+        ${s.webdav_has_password ? `<button class="btn sm" id="st-webdav-clear">${esc(t('webdavPwClear'))}</button>` : ''}
+      </div>
+      <div class="tip" style="margin-top:8px">
+        ${s.webdav_enabled ? `<span style="color:#0f9d58">${esc(t('webdavOn'))}</span>` : `<span style="color:#b45309">${esc(t('webdavOff'))}</span>`}
+        · ${esc(t('webdavMount', { url: location.origin + '/webdav' }))}
+      </div>
+    </div>
     <!-- 下载市场作为首页 -->
     <div class="glass group">
       <div class="row">
         <div class="info"><div class="t">🏪 ${esc(t('homeRedirectMarket'))}</div><div class="d">${esc(t('homeRedirectMarketD'))}</div></div>
         <label class="switch">
           <input type="checkbox" id="st-home-market" ${s.home_redirect_market ? 'checked' : ''}>
-          <span class="slider"></span>
+          <span class="track"><span class="thumb"></span></span>
         </label>
       </div>
       <div class="tip" style="margin-top:8px">${esc(t('homeRedirectMarketHint'))}</div>
@@ -2508,7 +2630,7 @@ async function loadSettings(){
         <div class="info"><div class="t">🎟️ ${esc(t('codesFloatingBtn'))}</div><div class="d">${esc(t('codesFloatingBtnD'))}</div></div>
         <label class="switch">
           <input type="checkbox" id="st-codes-float" ${s.codes_floating_button_enabled !== false ? 'checked' : ''}>
-          <span class="slider"></span>
+          <span class="track"><span class="thumb"></span></span>
         </label>
       </div>
       <div class="row">
@@ -2628,19 +2750,35 @@ async function loadSettings(){
     const body = {
       site_title: $('#st-title').value.trim(),
       traffic_limit_gb: Number($('#st-limit').value) || 0,
+      max_upload_mb: Number($('#st-max-upload').value) || 0,
+      storage_quota_mb: Number($('#st-quota').value) || 0,
       max_downloads_per_ip: Number($('#st-perip').value) || 0,
       count_window_hours: Number($('#st-window').value) || 0,
       auto_ban: $('#st-autoban').checked,
       ban_hours: Number($('#st-banhours').value) || 0,
       oauth_enabled: $('#oauth-enabled').checked,
       admin_ips: $('#st-adminips').value.trim(),
+      webdav_enabled: $('#st-webdav-on').checked,
+      webdav_username: $('#st-webdav-user').value.trim(),
       home_redirect_market: $('#st-home-market').checked,
       codes_floating_button_enabled: $('#st-codes-float').checked,
       codes_floating_button_position: $('#st-codes-pos').value,
     };
-    const r = await api('/api/admin/settings', { method:'PUT', body: JSON.stringify(body) });
-    toast(r && r.unbanned > 0 ? t('unbannedN', { n: r.unbanned }) : t('saved'));
-    loadSettings();
+    const wdPw = $('#st-webdav-pw').value;
+    if (wdPw) body.webdav_password = wdPw; // 留空 = 保持原口令不变
+    try {
+      const r = await api('/api/admin/settings', { method:'PUT', body: JSON.stringify(body) });
+      toast(r && r.unbanned > 0 ? t('unbannedN', { n: r.unbanned }) : t('saved'));
+      loadSettings();
+    } catch(e) { toast(e.message, 'err'); }
+  });
+  $('#st-webdav-clear')?.addEventListener('click', async () => {
+    if (!(await confirmDialog(t('webdavPwClear'), t('webdavD'), false))) return;
+    try {
+      await api('/api/admin/settings', { method:'PUT', body: JSON.stringify({ webdav_password: '' }) });
+      toast(t('webdavSavedToast'));
+      loadSettings();
+    } catch(e) { toast(e.message, 'err'); }
   });
 
   // ═══════════════════════════════════
@@ -2969,6 +3107,7 @@ function showRecoveryCodes(codes){
   try{
     const s = await api('/api/admin/session');
     siteTitle = s.site_title || siteTitle;
+    if (s.max_upload_mb) maxUploadMb = s.max_upload_mb;
     showApp();
   }catch{
     // api() 内部已对 401 调用 showLogin() 并 throw，这里静默兜底即可

@@ -11,57 +11,7 @@ import {
   handleOAuthProviders,
 } from "./oauth_handlers";
 import { findCodeByString, formatCodeStatus, checkCodeUsable, isCodeLenientFormat } from "./codes";
-
-/** 客户端真实 IP：从 CF 头或连接地址取 */
-function clientIp(req: Request): string {
-  const fwd = req.headers.get("cf-connecting-ip");
-  if (fwd) return fwd.split(",")[0].trim();
-  return req.headers.get("x-forwarded-for")?.split(",")[0].trim() ?? "unknown";
-}
-
-/**
- * IP 限流（Worker 内存实现）：
- *   - 只限制公开敏感端点（激活码查询）
- *   - 1 分钟窗口内最多 30 次请求
- *   - 超过返回 429；连续超限自动封禁 5 分钟
- *
- * ⚠️ Worker 无状态，内存会在隔离重启时清空。
- *    这只是加重爆破成本，不是精确计费。要严格限流请用 KV/D1。
- */
-const RATE_LIMIT_WINDOW_MS = 60 * 1000;        // 1 分钟窗口
-const RATE_LIMIT_MAX = 30;                     // 窗口内最多 30 次
-const RATE_LIMIT_BAN_MS = 5 * 60 * 1000;       // 超限后封禁 5 分钟
-interface RateEntry { count: number; windowStart: number; bannedUntil: number; }
-const rateLimitMap = new Map<string, RateEntry>();
-function checkRateLimit(ip: string): { ok: boolean; retryAfterSec?: number } {
-  const now = Date.now();
-  let entry = rateLimitMap.get(ip);
-  if (!entry) {
-    entry = { count: 0, windowStart: now, bannedUntil: 0 };
-    rateLimitMap.set(ip, entry);
-  }
-  // 封禁中
-  if (entry.bannedUntil > now) {
-    return { ok: false, retryAfterSec: Math.ceil((entry.bannedUntil - now) / 1000) };
-  }
-  // 重置窗口
-  if (now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
-    entry.count = 0;
-    entry.windowStart = now;
-  }
-  entry.count++;
-  if (entry.count > RATE_LIMIT_MAX) {
-    entry.bannedUntil = now + RATE_LIMIT_BAN_MS;
-    return { ok: false, retryAfterSec: Math.ceil(RATE_LIMIT_BAN_MS / 1000) };
-  }
-  // 顺便清理老条目（简单版：超过 1 分钟没访问就清掉）
-  for (const [k, v] of rateLimitMap) {
-    if (now - v.windowStart > RATE_LIMIT_WINDOW_MS * 3 && v.bannedUntil === 0) {
-      rateLimitMap.delete(k);
-    }
-  }
-  return { ok: true };
-}
+import { clientIp, rateLimit, rateLimitRetryAfter } from "./auth";
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -117,7 +67,7 @@ async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
   if (path === "/oauth/session" && req.method === "GET") {
     return handleOAuthSession(req, env);
   }
-  if (path === "/oauth/logout" && (req.method === "POST" || req.method === "GET")) {
+  if (path === "/oauth/logout" && req.method === "POST") {
     return handleOAuthLogout(req);
   }
 
@@ -129,11 +79,10 @@ async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
     await ensureSchema(env);
     // ① IP 限流 —— 公开端点，防枚举爆破
     const ip = clientIp(req);
-    const limit = checkRateLimit(ip);
-    if (!limit.ok) {
+    if (!rateLimit(ip, "codes", 30)) {
       return Response.json(
         { ok: false, error: "rate_limited", message: "请求过于频繁，请稍后再试" },
-        { status: 429, headers: { "Retry-After": String(limit.retryAfterSec ?? 60) } }
+        { status: 429, headers: { "Retry-After": String(rateLimitRetryAfter(ip, "codes")) } }
       );
     }
     const code = (new URL(req.url).searchParams.get("code") || "").trim().toUpperCase();
@@ -248,6 +197,15 @@ async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
       if (req.method !== "POST") {
         return new Response("Method Not Allowed", { status: 405 });
       }
+      // 口令校验必须限流：这是唯一的分享密码入口
+      // 按 IP+token 分桶，避免同一个 NAT 后面有人误刷就把所有人的分享页锁死
+      const ip = clientIp(req);
+      if (!rateLimit(ip, "share-verify:" + token, 10)) {
+        return Response.json(
+          { error: "too_many_attempts", message: "尝试过于频繁，请稍后再试" },
+          { status: 429, headers: { "Retry-After": String(rateLimitRetryAfter(ip, "share-verify:" + token)) } }
+        );
+      }
       return handleVerify(req, env, token);
     }
     if (sub === "/download") {
@@ -277,7 +235,7 @@ async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
   // WebDAV 服务 —— 挂载点 /webdav/*
   // 通过 HTTP Basic Auth 保护，启用后可在 Finder/Explorer 等直接挂载
   // ══════════════════════════════════════════════════════════════
-  if (path.startsWith("/webdav")) {
+  if (path === "/webdav" || path.startsWith("/webdav/")) {
     await ensureSchema(env);
     const { handleWebDAV } = await import("./webdav");
     return handleWebDAV(req, env, ctx);
